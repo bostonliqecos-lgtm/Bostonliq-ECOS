@@ -1,0 +1,28 @@
+process.env.DB_FILE=':memory:';process.env.APP_SECRET='t'.repeat(32);process.env.ADMIN_EMAIL='admin@t.uz';process.env.ADMIN_PASSWORD='adminpass1';
+const {server,db}=require('./server.js');const assert=require('assert');
+server.listen(0,async()=>{const base='http://localhost:'+server.address().port;
+ const api=async(m,p,b,t)=>{const r=await fetch(base+p,{method:m,headers:{'Content-Type':'application/json',...(t?{Authorization:'Bearer '+t}:{})},body:b?JSON.stringify(b):undefined});return {s:r.status,j:await r.json()}};
+ try{
+ let a=await api('POST','/api/login',{email:'admin@t.uz',password:'adminpass1'});const adm=a.j.token;assert(adm,'admin login');
+ assert.equal((await api('POST','/api/login',{email:'admin@t.uz',password:'bad'})).s,401);
+ a=await api('POST','/api/register',{email:'u@t.uz',password:'password1',full_name:'Test User',accept_terms:true});const u=a.j.token;assert(u,'register');
+ assert.equal((await api('POST','/api/register',{email:'u@t.uz',password:'password1',full_name:'X Y',accept_terms:true})).s,409);
+ assert.equal((await api('POST','/api/reports',{category:'waste',title:'Мусор',description:'Свалка у дороги',lat:41.6,lng:69.9})).s,401,'guest blocked');
+ const rep=await api('POST','/api/reports',{category:'waste',title:'Мусор',description:'Свалка у дороги',lat:41.6,lng:69.9},u);assert(rep.j.id,'report');
+ assert.equal((await api('POST','/api/reports',{category:'waste',title:'Мусор',description:'Свалка у дороги',lat:999,lng:69.9},u)).s,400,'bad coords');
+ assert.equal((await api('PATCH','/api/reports/1/status',{status:'in_progress'},u)).s,403,'user cannot moderate');
+ assert.equal((await api('GET','/api/admin/users',null,u)).s,403,'user cannot list users');
+ await api('PATCH','/api/reports/1/status',{status:'in_progress'},adm);await api('PATCH','/api/reports/1/status',{status:'resolved'},adm);
+ assert.equal((await api('GET','/api/wallet',null,u)).j.balance,10,'reward credited exactly once');
+ const p=await api('POST','/api/partners',{name:'Кафе'},adm);const o=await api('POST','/api/offers',{partner_id:p.j.id,title:'Кофе',cost_points:5},adm);
+ const r1=await api('POST',`/api/offers/${o.j.id}/redeem`,{idempotency_key:'abcdefgh1'},u),r2=await api('POST',`/api/offers/${o.j.id}/redeem`,{idempotency_key:'abcdefgh1'},u);
+ assert.equal(r1.j.code,r2.j.code,'idempotent');assert.equal((await api('GET','/api/wallet',null,u)).j.balance,5,'charged once');
+ assert.equal((await api('POST',`/api/offers/${o.j.id}/redeem`,{idempotency_key:'abcdefgh2'},u)).s,200);
+ assert.equal((await api('POST',`/api/offers/${o.j.id}/redeem`,{idempotency_key:'abcdefgh3'},u)).s,402,'insufficient funds');
+ assert.equal((await api('POST','/api/qr/verify',{code:r1.j.code},adm)).s,200);assert.equal((await api('POST','/api/qr/verify',{code:r1.j.code},adm)).s,409,'single use');
+ const ev=await api('POST','/api/events',{title:'Субботник',starts_at:'2026-12-01T10:00',capacity:1,reward_points:20},adm);
+ assert.equal((await api('POST',`/api/events/${ev.j.id}/register`,{},u)).s,200);assert.equal((await api('POST',`/api/events/${ev.j.id}/register`,{},u)).j.already,true);
+ assert.equal((await api('POST','/api/events',{title:'X',starts_at:'2026-12-01T10:00',capacity:1},u)).s,403);
+ assert.equal((await api('PATCH','/api/admin/users/2',{role:'leader'},adm)).s,200);
+ assert.equal((await api('POST','/api/news',{title:'Новость',body:'Текст новости'},u)).s,200,'promoted user can write news');
+ console.log('ALL TESTS PASSED');}catch(e){console.error('FAIL',e);process.exitCode=1}server.close()});
